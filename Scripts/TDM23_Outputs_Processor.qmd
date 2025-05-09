@@ -1,0 +1,190 @@
+---
+title: "TDM23_Outputs_Processor"
+format: html
+editor: visual
+---
+
+## 1 - Setup
+
+To process OMX files produced by TDM23 several packages are needed that are not available on CRAN. These must be downloaded using the BiocManager package from Bioconductor and the install_github() function from the devtools package
+
+```{r}
+
+cran.pkgs <- c('tidyverse','data.table', 'sf', 'BiocManager', 'devtools','here')
+
+inst <- cran.pkgs %in% installed.packages()
+if (length(cran.pkgs[!inst]) > 0) {
+  install.packages(cran.pkgs[!inst], source = T, dependencies = T)
+}
+
+ext.pkgs <- c('rhdf5', 'omxr')
+
+inst2 <- ext.pkgs %in% installed.packages()
+if (length(ext.pkgs[!inst2]) > 0) {
+  BiocManager::install("rhdf5")
+  devtools::install_github("gregmacfarlane/omxr")
+}
+
+# Load packages into session
+lapply(c(cran.pkgs,ext.pkgs), library, character.only = TRUE)
+
+# Options and helper functions
+
+options(scipen=999)
+sun <- function(x){sort(unique(x))}
+lun <- function(x){length(unique(x))}
+
+# Directory Path for Project
+
+#version <- 'tdm23.1.0'
+version <- 'tdm23.2.0'
+
+root <- paste0('S:/Network Shares/K Drive/DataServices/Datasets/Transportation/CTPS/TDM23/',version)
+
+tt.path <- paste0(root,'/Outputs/Trip_Tables/')
+skim.path <- paste0(root,'/Outputs/Skims/')
+taz.path <- paste0(root,'/Zonal/')
+
+```
+
+## 2 - Trip Tables
+
+# 2.1 - Standard Output Tables
+```{r}
+
+base <- paste0(tt.path, '/Base/per_trips_daily_base.omx')
+plan <- paste0(tt.path, '/Plan2050/per_trips_daily_2050.omx')
+
+for (fname in c(base, plan)) {
+  vars <- list_omx(fname)$Matrices$name
+  dx <- as.data.table(read_all_omx(fname, names = vars))
+  dx[is.na(dx)] <- 0
+  dx[dx < 0] <- 0
+  rds.out <- gsub('omx', 'rds', fname)
+  saveRDS(dx, rds.out)
+  csv.out <- gsub('omx', 'csv', fname)
+  fwrite(dx, csv.out)
+  rm(dx)
+  gc()
+}
+
+```
+
+# 2.2 - Trips by Mode / Purpose / Time of Day
+
+```{r}
+
+base.tt <- list.files(path=paste0(tt.path,'/Base'),pattern=glob2rx('od_*.omx'),full.names = T)
+plan.tt <- list.files(path=paste0(tt.path,'/Plan2050'),pattern=glob2rx('od_*.omx'),full.names = T)
+
+
+for (fname in plan.tt) {
+  vars <- list_omx(fname)$Matrices$name
+  dx <- as.data.table(read_all_omx(fname, names=vars))
+  if (grepl('hbsc', fname)) {
+    setnames(
+      dx,
+      c(
+        'from_zone_id',
+        'to_zone_id',
+        'bike',
+        'sov',
+        'rideshare',
+        'hov2',
+        'hov3',
+        'schoolbus',
+        'dat_access',
+        'dat_egress',
+        'wat',
+        'walk'
+      )
+    )
+  } else if (grepl('nhb', fname)) {
+    setnames(
+      dx,
+      c(
+        'from_zone_id',
+        'to_zone_id',
+        'bike',
+        'sov',
+        'rideshare',
+        'hov2',
+        'hov3',
+        'wat',
+        'walk'
+      )
+    )
+  } else {
+    setnames(
+      dx,
+      c(
+        'from_zone_id',
+        'to_zone_id',
+        'bike',
+        'sov',
+        'rideshare',
+        'hov2',
+        'hov3',
+        'dat_access',
+        'dat_egress',
+        'wat',
+        'walk'
+      )
+    )
+  }
+  
+  dx[is.na(dx)] <- 0
+  dx[dx < 0] <- 0
+  rds.out <- gsub('omx','rds',fname)
+  saveRDS(dx, rds.out)
+  csv.out <- gsub('omx', 'csv', fname)
+  fwrite(dx, csv.out)
+  rm(dx)
+  gc()
+  
+}
+
+
+```
+
+# 2.3 - Zonal Data Merge
+
+```{r}
+
+fr <- fread(here('taz_id.csv'))
+setnames(fr,c('taz_id','from_zone_id'))
+setkey(fr,from_zone_id)
+
+to <- fread(here('taz_id.csv'))
+setnames(to,c('destination','to_zone_id'))
+setkey(to,to_zone_id)
+
+for (d in c('/Base/', '/Plan2050/')) {
+  for (p in c('hbw', 'hbu', 'hbpb', 'hbsc', 'hbsr', 'nhbw', 'nhbnw')) {
+    fl <- list.files(path = paste0(root,d), pattern = glob2rx(paste0('od_', p, '*.rds')), full.names = T)
+    
+    for (f in fl) {
+      dt <- readRDS(f)
+      setkey(dt, from_zone_id)
+      dt <- fr[dt]
+      setkey(dt, to_zone_id)
+      dt <- to[dt]
+      do <- dt[, -c('from_zone_id', 'to_zone_id')]
+      setnames(do, 'origin', 'from_zone_id',)
+      setnames(do, 'destination', 'to_zone_id')
+      saveRDS(do, f)
+      rm(dt, do)
+      gc()
+      message(paste0(f, ' complete'))
+    }
+    
+    dl <- lapply(fl, readRDS)
+    dt <- rbindlist(dl)
+    dt <- dt[, lapply(.SD, sum, na.rm = T), .(from_zone_id, to_zone_id)]
+    saveRDS(dt,
+            paste0('tdm23.1.0_', toupper(p), '_daily_trip_table.rds'))
+    message(paste0(p, ' trip table complete'))
+  }
+}
+
+```
